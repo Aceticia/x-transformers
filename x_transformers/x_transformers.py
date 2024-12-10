@@ -1079,6 +1079,7 @@ class Attention(Module):
         neutreno_alpha = 0.4,
         learned_value_residual_mix = False,
         laser = False, # https://arxiv.org/abs/2411.03493v1
+        laser_softclamp_value = 15.,
         onnxable = False,
         attend_sdp_kwargs: dict = dict(
             enable_flash = True,
@@ -1119,9 +1120,9 @@ class Attention(Module):
         self.to_v = LinearNoBias(dim_kv, v_dim) if not shared_kv else None
 
         # enhancing gradients to attention through exponentiated values
-        # todo - compare it to `attn = attn * large_value + attn.detach() * (1. - large_value)`
 
         self.laser = laser
+        self.laser_softclamp_value = laser_softclamp_value
 
         # relations projection from tp-attention
 
@@ -1449,8 +1450,7 @@ class Attention(Module):
             attn_bias = pad_at_dim(attn_bias, (num_mem_kv, 0))
 
         if self.laser:
-            values_max = v.amax(dim = -2, keepdim = True).detach() # numerical stability
-            v = v - values_max
+            v = softclamp(v, self.laser_softclamp_value)
             v = v.exp()
 
         # attention is all we need
@@ -1465,7 +1465,7 @@ class Attention(Module):
         # laser
 
         if self.laser:
-            out = out.log() + values_max
+            out = log(out)
 
         # store the values for resformer or Neutreno
 
@@ -1848,8 +1848,7 @@ class AttentionLayers(Module):
                 layer = Attention(dim, heads = heads, causal = causal, learned_value_residual_mix = self_attn_learned_value_residual, **attn_kwargs)
                 is_first_self_attn = False
             elif layer_type == 'c':
-                cross_attn_learned_value_residual = learned_value_residual_mix and not is_first_cross_attn
-                layer = Attention(dim, heads = heads, learned_value_residual_mix = cross_attn_learned_value_residual, **{**attn_kwargs, **cross_attn_kwargs})
+                layer = Attention(dim, heads = heads, **{**attn_kwargs, **cross_attn_kwargs})
                 is_first_cross_attn = False
             elif layer_type == 'f':
                 layer = FeedForward(dim, **ff_kwargs)
