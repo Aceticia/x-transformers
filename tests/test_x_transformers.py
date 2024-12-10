@@ -10,6 +10,7 @@ from x_transformers.x_transformers import (
     Encoder,
     Decoder,
     LinearNoBias,
+    CrossAttender
 )
 
 from x_transformers.neo_mlp import (
@@ -430,6 +431,29 @@ def test_custom_rotary_pos_emb():
     logits1 = model(x, pos = pos)
     logits2 = model(x)
     assert torch.allclose(logits1, logits2)
+
+
+def test_custom_rotary_pos_emb_cross_attn():
+    from einops import repeat
+
+    model = CrossAttender(
+        dim = 512,
+        cross_attn_dim_context = 256,
+        depth = 2,
+        heads = 8,
+        rotary_pos_emb = True
+    )
+
+    x = torch.rand(4, 4, 512)
+    context = torch.rand(4, 8, 256)
+
+    pos = repeat(torch.arange(0, 4), "n -> b n", b=4)
+    context_pos = repeat(torch.arange(0, 8), "n -> b n", b=4)
+
+    logits1 = model(x, context = context, pos = pos, context_pos = context_pos)
+    logits2 = model(x, context = context, pos = pos)
+    assert not torch.allclose(logits1, logits2)
+
 
 @pytest.mark.parametrize('flash', (True, False))
 def test_custom_alibi_across_heads(flash: bool):

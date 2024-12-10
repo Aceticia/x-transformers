@@ -1284,6 +1284,7 @@ class Attention(Module):
         rel_pos = None,
         attn_bias = None,
         rotary_pos_emb = None,
+        context_rotary_pos_emb = None,
         pos = None, # for custom alibi positions
         prev_attn = None,
         mem = None,
@@ -1355,15 +1356,27 @@ class Attention(Module):
             q = q * self.qk_norm_q_scale
             k = k * self.qk_norm_k_scale
 
-        if exists(rotary_pos_emb) and not has_context:
+        if exists(rotary_pos_emb):
             freqs, xpos_scale = rotary_pos_emb
-            q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale ** -1.) if exists(xpos_scale) else (1., 1.)
+            if not has_context:
+                q_xpos_scale, k_xpos_scale = (xpos_scale, xpos_scale ** -1.) if exists(xpos_scale) else (1., 1.)
 
-            q = apply_rotary_pos_emb(q, freqs, q_xpos_scale)
-            k = apply_rotary_pos_emb(k, freqs, k_xpos_scale)
+                q = apply_rotary_pos_emb(q, freqs, q_xpos_scale)
+                k = apply_rotary_pos_emb(k, freqs, k_xpos_scale)
 
-            if self.rotary_embed_values:
-                v = apply_rotary_pos_emb(v, freqs, k_xpos_scale)
+                if self.rotary_embed_values:
+                    v = apply_rotary_pos_emb(v, freqs, k_xpos_scale)
+
+            elif exists(context_rotary_pos_emb):
+                freqs, _ = rotary_pos_emb
+                context_freqs, _ = context_rotary_pos_emb
+
+                # Use context freqs and xpos scale for keys, and query uses the original freqs and xpos scale
+                q = apply_rotary_pos_emb(q, freqs, 1.)
+                k = apply_rotary_pos_emb(k, context_freqs, 1.)
+
+                if self.rotary_embed_values:
+                    v = apply_rotary_pos_emb(v, context_freqs, 1.)
 
         input_mask = context_mask
 
@@ -1916,6 +1929,8 @@ class AttentionLayers(Module):
         return_hiddens = False,
         rotary_pos_emb = None,
         pos = None,
+        context_pos = None,
+        context_rotary_pos_emb = None,
         attn_bias = None,
         condition = None,
         in_attn_cond = None, # https://arxiv.org/abs/2105.04090
@@ -1974,15 +1989,21 @@ class AttentionLayers(Module):
                 self_attn_kv_mask = left_pad_mask
 
         # rotary positions
+        if exists(self.rotary_pos_emb):
+            if not exists(rotary_pos_emb):
+                if len(mems) > 0:
+                    maybe_mem = mems[0] # todo - handle edge case where different layers get different memory lengths. don't think this will ever come up but who knows
+                    mem_len = maybe_mem.shape[1] if exists(maybe_mem) else 0
+                else:
+                    mem_len = 0
 
-        if not exists(rotary_pos_emb) and exists(self.rotary_pos_emb):
-            maybe_mem = mems[0] # todo - handle edge case where different layers get different memory lengths. don't think this will ever come up but who knows
-            mem_len = maybe_mem.shape[1] if exists(maybe_mem) else 0
+                if not exists(pos):
+                    pos = torch.arange(x.shape[1] + mem_len, device = x.device) - mem_len
 
-            if not exists(pos):
-                pos = torch.arange(x.shape[1] + mem_len, device = x.device) - mem_len
+                rotary_pos_emb = self.rotary_pos_emb(pos)
 
-            rotary_pos_emb = self.rotary_pos_emb(pos)
+            if not exists(context_rotary_pos_emb) and exists(context_pos) and exists(context):
+                context_rotary_pos_emb = self.rotary_pos_emb(context_pos)
 
         # assume cached key / values
 
@@ -2107,7 +2128,7 @@ class AttentionLayers(Module):
             if layer_type == 'a':
                 out, inter = block(x, mask = mask, context_mask = self_attn_kv_mask, attn_mask = attn_mask, rel_pos = self.rel_pos, pos = pos, rotary_pos_emb = rotary_pos_emb, prev_attn = prev_attn, cache = next(iter_attn_cache, None), mem = layer_mem, mem_mask = layer_mem_mask, attn_bias = attn_bias, value_residual = maybe_self_attn_value_residual, return_intermediates = True)
             elif layer_type == 'c':
-                out, inter = block(x, context = context, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn, cache = next(iter_attn_cache, None), value_residual = maybe_cross_attn_value_residual, return_intermediates = True)
+                out, inter = block(x, context = context, rotary_pos_emb = rotary_pos_emb, context_rotary_pos_emb = context_rotary_pos_emb, mask = mask, context_mask = context_mask, prev_attn = prev_cross_attn, cache = next(iter_attn_cache, None), value_residual = maybe_cross_attn_value_residual, return_intermediates = True)
             elif layer_type == 'f':
                 out = block(x)
 
